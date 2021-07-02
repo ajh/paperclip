@@ -4,30 +4,40 @@ module Paperclip
   class Geometry
     attr_accessor :height, :width, :modifier
 
+    EXIF_ROTATED_ORIENTATION_VALUES = [5, 6, 7, 8]
+
     # Gives a Geometry representing the given height and width
-    def initialize width = nil, height = nil, modifier = nil
-      @height = height.to_f
-      @width  = width.to_f
-      @modifier = modifier
+    def initialize(width = nil, height = nil, modifier = nil)
+      if width.is_a?(Hash)
+        options = width
+        @height = options[:height].to_f
+        @width = options[:width].to_f
+        @modifier = options[:modifier]
+        @orientation = options[:orientation].to_i
+      else
+        @height = height.to_f
+        @width  = width.to_f
+        @modifier = modifier
+      end
     end
 
-    # Uses ImageMagick to determing the dimensions of a file, passed in as either a
-    # File or path.
-    def self.from_file file
-      file = file.path if file.respond_to? "path"
-      geometry = begin
-                   Paperclip.run("identify", %Q[-format "%wx%h" "#{file}"[0]])
-                 rescue PaperclipCommandLineError
-                   ""
-                 end
-      parse(geometry) ||
-        raise(NotIdentifiedByImageMagickError.new("#{file} is not recognized by the 'identify' command."))
+    # Extracts the Geometry from a file (or path to a file)
+    def self.from_file(file)
+      GeometryDetector.new(file).make
     end
 
-    # Parses a "WxH" formatted string, where W is the width and H is the height.
-    def self.parse string
-      if match = (string && string.match(/\b(\d*)x?(\d*)\b([\>\<\#\@\%^!])?/i))
-        Geometry.new(*match[1,3])
+    # Extracts the Geometry from a "WxH,O" string
+    # Where W is the width, H is the height,
+    # and O is the EXIF orientation
+    def self.parse(string)
+      GeometryParser.new(string).make
+    end
+
+    # Swaps the height and width if necessary
+    def auto_orient
+      if EXIF_ROTATED_ORIENTATION_VALUES.include?(@orientation)
+        @height, @width = @width, @height
+        @orientation -= 4
       end
     end
 
@@ -75,12 +85,12 @@ module Paperclip
       to_s
     end
 
-    # Returns the scaling and cropping geometries (in string-based ImageMagick format) 
-    # neccessary to transform this Geometry into the Geometry given. If crop is true, 
-    # then it is assumed the destination Geometry will be the exact final resolution. 
-    # In this case, the source Geometry is scaled so that an image containing the 
-    # destination Geometry would be completely filled by the source image, and any 
-    # overhanging image would be cropped. Useful for square thumbnail images. The cropping 
+    # Returns the scaling and cropping geometries (in string-based ImageMagick format)
+    # neccessary to transform this Geometry into the Geometry given. If crop is true,
+    # then it is assumed the destination Geometry will be the exact final resolution.
+    # In this case, the source Geometry is scaled so that an image containing the
+    # destination Geometry would be completely filled by the source image, and any
+    # overhanging image would be cropped. Useful for square thumbnail images. The cropping
     # is weighted at the center of the Geometry.
     def transformation_to dst, crop = false
       if crop
@@ -92,6 +102,33 @@ module Paperclip
       end
 
       [ scale_geometry, crop_geometry ]
+    end
+
+    # resize to a new geometry
+    # @param geometry [String] the Paperclip geometry definition to resize to
+    # @example
+    #   Paperclip::Geometry.new(150, 150).resize_to('50x50!')
+    #   #=> Paperclip::Geometry(50, 50)
+    def resize_to(geometry)
+      new_geometry = Paperclip::Geometry.parse geometry
+      case new_geometry.modifier
+      when '!', '#'
+        new_geometry
+      when '>'
+        if new_geometry.width >= self.width && new_geometry.height >= self.height
+          self
+        else
+          scale_to new_geometry
+        end
+      when '<'
+        if new_geometry.width <= self.width || new_geometry.height <= self.height
+          self
+        else
+          scale_to new_geometry
+        end
+      else
+        scale_to new_geometry
+      end
     end
 
     private
@@ -110,6 +147,12 @@ module Paperclip
       else
         "%dx%d+%d+%d" % [ dst.width, dst.height, (self.width * scale - dst.width) / 2, 0 ]
       end
+    end
+
+    # scale to the requested geometry and preserve the aspect ratio
+    def scale_to(new_geometry)
+      scale = [new_geometry.width.to_f / self.width.to_f , new_geometry.height.to_f / self.height.to_f].min
+      Paperclip::Geometry.new((self.width * scale).round, (self.height * scale).round)
     end
   end
 end
